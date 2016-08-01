@@ -57,11 +57,11 @@ func Start() {
 
 // RRA.Point.Size
 const (
-	RRA1PointCnt   = 720 // 1m一个点存12h
-	RRA5PointCnt   = 576 // 5m一个点存2d
-	RRA20PointCnt  = 504 // 20m一个点存7d
-	RRA180PointCnt = 766 // 3h一个点存3month
-	RRA720PointCnt = 730 // 12h一个点存1year
+	RRA1PointCnt   = 2160 // 1m一个点存36h
+	RRA5PointCnt   = 576  // 5m一个点存2d
+	RRA20PointCnt  = 504  // 20m一个点存7d
+	RRA180PointCnt = 766  // 3h一个点存3month
+	RRA720PointCnt = 730  // 12h一个点存1year
 )
 
 func create(filename string, item *cmodel.GraphItem) error {

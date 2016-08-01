@@ -22,7 +22,7 @@ import (
 // 0.5.5 use commom(rm model), fix sync disk
 
 const (
-	VERSION         = "0.5.6"
+	VERSION         = "0.5.6a"
 	GAUGE           = "GAUGE"
 	DERIVE          = "DERIVE"
 	COUNTER         = "COUNTER"
