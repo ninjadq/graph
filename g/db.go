@@ -14,12 +14,18 @@ var (
 )
 
 var DB *sql.DB
+var AutoDB *sql.DB
 
 func InitDB() {
 	var err error
 	DB, err = makeDbConn()
 	if DB == nil || err != nil {
 		log.Fatalln("g.InitDB, get db conn fail", err)
+	}
+
+	AutoDB, err = makeAutoDbConn()
+	if err != nil {
+		log.Fatalln("g.InitAutodb failure", err)
 	}
 
 	dbConnMap = make(map[string]*sql.DB)
@@ -52,9 +58,33 @@ func GetDbConn(connName string) (c *sql.DB, e error) {
 	return dbConn, err
 }
 
+func GetAutoDBConn() (*sql.DB, error) {
+	var err error
+	if AutoDB != nil {
+		if err = AutoDB.Ping(); err == nil {
+			return AutoDB, nil
+		}
+	}
+	log.Println("[INFO] AutoDB lose connection...", err)
+	AutoDB, err = makeAutoDbConn()
+	return AutoDB, err
+}
+
 // 创建一个新的mysql连接
 func makeDbConn() (conn *sql.DB, err error) {
 	conn, err = sql.Open("mysql", Config().DB.Dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	conn.SetMaxIdleConns(Config().DB.MaxIdle)
+	err = conn.Ping()
+
+	return conn, err
+}
+
+func makeAutoDbConn() (conn *sql.DB, err error) {
+	conn, err = sql.Open("mysql", Config().DB.AutoDsn)
 	if err != nil {
 		return nil, err
 	}

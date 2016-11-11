@@ -12,6 +12,7 @@ import (
 func Start() {
 	InitCache()
 	go StartIndexUpdateIncrTask()
+	go SyncItem2DBTask()
 	log.Println("index.Start ok")
 }
 
