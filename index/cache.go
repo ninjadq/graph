@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"log"
@@ -9,12 +10,11 @@ import (
 	"sync"
 	"time"
 
-	tcache "github.com/toolkits/cache/localcache/timedcache"
-
 	cmodel "github.com/open-falcon/common/model"
 	cutils "github.com/open-falcon/common/utils"
 	"github.com/open-falcon/graph/g"
 	"github.com/open-falcon/graph/proc"
+	tcache "github.com/toolkits/cache/localcache/timedcache"
 )
 
 const (
@@ -26,6 +26,7 @@ const (
 var (
 	indexedItemCache   = NewIndexCacheBase(DefaultMaxCacheSize)
 	unIndexedItemCache = NewIndexCacheBase(DefaultMaxCacheSize)
+	monitorItemCache   = NewMonitorItemCache()
 )
 
 // db本地缓存
@@ -38,6 +39,7 @@ var (
 
 // 初始化cache
 func InitCache() {
+	monitorItemCache.InitItemCache()
 	go startCacheProcUpdateTask()
 }
 
@@ -215,4 +217,222 @@ func (this *IndexCacheBase) Keys() []string {
 	}
 
 	return keys
+}
+
+type MonitorItemCache struct {
+	synced   map[string]bool
+	unsynced map[string]map[string]string
+	sync.RWMutex
+}
+
+// initItemCache init the MonitorItemCaches
+func (m *MonitorItemCache) InitItemCache() {
+	m.Lock()
+	defer m.Unlock()
+	log.Println("[INFO] Init MonitorItem Cache")
+	sqlStr := `SELECT metric, tag.name, value from monitorconfig_item  as item
+LEFT JOIN monitorconfig_item_tags as it  ON item.id=it.item_id
+LEFT JOIN monitorconfig_tag as tag ON tag.id=it.tag_id
+LEFT JOIN monitorconfig_tag_options as top ON top.tag_id = tag.id
+LEFT JOIN monitorconfig_option as o ON o.id = top.option_id`
+	rows, err := g.AutoDB.Query(sqlStr)
+	if err != nil {
+		log.Fatalln("[Error] init MonitorItemCache failure", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var metric, tag, value sql.NullString
+		if err := rows.Scan(&metric, &tag, &value); err != nil {
+			log.Fatal(err)
+		}
+		key := ""
+		var buffer bytes.Buffer
+		if metric.Valid {
+			buffer.WriteString(metric.String)
+		}
+		if tag.Valid && value.Valid {
+			buffer.WriteString(tag.String)
+			buffer.WriteString(value.String)
+		}
+		key = buffer.String()
+		if key == "" {
+			continue
+		}
+		m.synced[key] = true
+	}
+	if err := rows.Err(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// insertEndpoint将
+func (m *MonitorItemCache) insertItemCacheIfNotExist(metric, tag, value, dstype string) {
+	key := metric + tag + value
+	m.Lock()
+	defer m.Unlock()
+
+	if _, ok := m.synced[key]; !ok {
+		if _, ok := m.unsynced[key]; !ok {
+			if g.Config().Debug {
+				log.Println("[DEBUG] A New Item is coming", metric, tag, value)
+			}
+			m.unsynced[key] = map[string]string{
+				"metric": metric,
+				"tag":    tag,
+				"value":  value,
+				"dstype": dstype,
+			}
+		}
+	}
+}
+
+// syncItemCache sync unsynced Item to DB
+func (m *MonitorItemCache) syncItemCache() {
+	m.Lock()
+	defer m.Unlock()
+	queryItemSql := "SELECT id FROM monitorconfig_item WHERE metric = ?"
+	insertItemSql := "INSERT INTO monitorconfig_item (name, metric, value_type, has_tag, has_log) VALUES( ?, ?, ?, 0, 0)"
+	queryItemTagSql := "SELECT tag.id From monitorconfig_item_tags AS it LEFT JOIN monitorconfig_tag as tag ON tag.id=it.tag_id WHERE it.item_id = ( ? ) AND tag.name = ( ? )"
+	insertTagSql := "INSERT INTO monitorconfig_tag (name, `explain`) VALUES( ?, ? )"
+	insertItemTag := "INSERT INTO monitorconfig_item_tags (item_id, tag_id) VALUES(? , ?)"
+	queryTagOptSql := "SELECT o.id FROM monitorconfig_tag_options AS top LEFT JOIN monitorconfig_option as o ON top.option_id = o.id WHERE top.tag_id= ( ? ) AND o.value= ( ? )"
+	insertOptSql := "INSERT INTO monitorconfig_option (value) VALUES ( ? )"
+	insertTagOptsSql := "INSERT INTO monitorconfig_tag_options (tag_id, option_id) VALUES ( ? , ? )"
+
+	var item_id, tag_id, opt_id int64
+	var metric, tag, option, dstype string
+	var result sql.Result
+	var err error
+	var tx *sql.Tx
+
+	for k, v := range m.unsynced {
+		metric, tag, option, dstype = v["metric"], v["tag"], v["value"], v["dstype"]
+		if g.Config().Debug {
+			log.Println("[DEBUG] start sync...", metric, tag, option, dstype)
+		}
+
+		tx, err = g.AutoDB.Begin()
+		if err != nil {
+			log.Println("[ERROR] when start a transaction", k, err)
+			continue
+		}
+		// 查找item的id，不存在就插入
+		err = tx.QueryRow(queryItemSql, metric).Scan(&item_id)
+		if err != nil { //DB中查询Item出错
+			if err == sql.ErrNoRows { // 错误为 item 不存在,则插入
+				result, err := tx.Exec(insertItemSql, metric, metric, dstype)
+				if err != nil { // 插入item出错，回滚
+					log.Println("[ERROR] Insert metric failure", k, err)
+					tx.Rollback()
+					continue
+				}
+				item_id, _ = result.LastInsertId()
+			} else { // 其他错误错,回滚
+				log.Println("[DEBUG] when query item ", k, err)
+				tx.Rollback()
+				continue
+			}
+		}
+
+		//tag为空就直接commit
+		if tag == "" {
+			if err = tx.Commit(); err != nil {
+				log.Println("[ERROR] when commit tx", k, err)
+			} else {
+				m.synced[k] = true
+				delete(m.unsynced, k)
+				if g.Config().Debug {
+					log.Println("[DEBUG] insert success only metrci", metric)
+				}
+			}
+			continue
+		}
+		err = tx.QueryRow(queryItemTagSql, item_id, tag).Scan(&tag_id)
+		if err != nil { //查找tag出错
+			if err == sql.ErrNoRows { // tag 不存在则插入
+				result, err = tx.Exec(insertTagSql, tag, tag)
+				if err != nil { //插入失败，回滚
+					log.Println("[ERROR] when Insert tag", k, err)
+					tx.Rollback()
+					continue
+				}
+				tag_id, _ = result.LastInsertId()
+			} else { //查DB出错，回滚
+				log.Println("[ERROR] when query tag", k, err)
+				tx.Rollback()
+				continue
+			}
+
+		}
+		_, err = tx.Exec(insertItemTag, item_id, tag_id)
+		if err != nil {
+			if !strings.Contains(err.Error(), "Duplicate entry") {
+				tx.Rollback()
+				log.Println("[ERROR] when insert Item tags", k, v, err)
+				continue
+			}
+		}
+
+		//查找option如果没有则回滚，因为这是错误的行为不能有没值的tag
+		if option == "" {
+			log.Println("[ERROR] tag is not nil but option is nil", tag, option)
+			tx.Rollback()
+			continue
+		}
+		err = tx.QueryRow(queryTagOptSql, tag_id, option).Scan(&opt_id)
+		if err != nil { // 如果是没有option则插入
+			if err == sql.ErrNoRows {
+				result, err := tx.Exec(insertOptSql, option)
+				if err != nil { // 插入失败回滚
+					log.Println("[ERROR] when insert option", k, err)
+					tx.Rollback()
+					continue
+				}
+				opt_id, _ = result.LastInsertId()
+			} else { // 查询出错也回滚
+				log.Println("[ERROR] when query option", k, err)
+				tx.Commit()
+				continue
+			}
+		}
+		_, err = tx.Exec(insertTagOptsSql, tag_id, opt_id)
+		if err != nil {
+			if !strings.Contains(err.Error(), "Duplicate entry") {
+				log.Println("[ERROR] when insert tag options", k, v)
+				tx.Rollback()
+				continue
+			}
+		}
+
+		if err = tx.Commit(); err != nil {
+			log.Println("[ERROR] when commit tx", k, err)
+			continue
+		} else {
+			m.synced[k] = true
+			delete(m.unsynced, k)
+			if g.Config().Debug {
+				log.Println("[DEBUG] insert success", metric, tag, option)
+			}
+		}
+
+	}
+}
+
+func NewMonitorItemCache() *MonitorItemCache {
+	return &MonitorItemCache{synced: make(map[string]bool),
+		unsynced: make(map[string]map[string]string)}
+}
+
+// 周期性的同步MonitorCahce到monitorsystem的数据库中
+func SyncItem2DBTask() {
+	tc := time.Tick(time.Minute)
+	for range tc {
+		monitorItemCache.syncItemCache()
+	}
+}
+
+func InsertMonitorCacheIfNeed(item *cmodel.GraphItem) {
+	for tag, value := range item.Tags {
+		monitorItemCache.insertItemCacheIfNotExist(item.Metric, tag, value, item.DsType)
+	}
 }

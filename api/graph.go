@@ -83,6 +83,9 @@ func handleItems(items []*cmodel.GraphItem) {
 
 		// To History
 		store.AddItem(checksum, items[i])
+
+		// To MonitorItemCache
+		index.InsertMonitorCacheIfNeed(items[i])
 	}
 }
 

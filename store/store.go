@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	cmodel "github.com/open-falcon/common/model"
-
 	"github.com/open-falcon/graph/g"
 )
 
