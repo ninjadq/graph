@@ -48,6 +48,7 @@ func HandleItems(items []*cmodel.GraphItem) error {
 }
 
 func handleItems(items []*cmodel.GraphItem) {
+
 	if items == nil {
 		return
 	}

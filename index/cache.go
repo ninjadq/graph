@@ -270,12 +270,9 @@ func (m *MonitorItemCache) insertItemCacheIfNotExist(metric, tag, value, dstype 
 	key := metric + tag + value
 	m.Lock()
 	defer m.Unlock()
-
 	if _, ok := m.synced[key]; !ok {
 		if _, ok := m.unsynced[key]; !ok {
-			if g.Config().Debug {
-				log.Println("[DEBUG] A New Item is coming", metric, tag, value)
-			}
+			log.Println("[INFO] A New Item is coming", metric, tag, value)
 			m.unsynced[key] = map[string]string{
 				"metric": metric,
 				"tag":    tag,
@@ -410,9 +407,7 @@ func (m *MonitorItemCache) syncItemCache() {
 		} else {
 			m.synced[k] = true
 			delete(m.unsynced, k)
-			if g.Config().Debug {
-				log.Println("[DEBUG] insert success", metric, tag, option)
-			}
+			log.Println("[INFO] insert success", metric, tag, option)
 		}
 
 	}
@@ -432,7 +427,12 @@ func SyncItem2DBTask() {
 }
 
 func InsertMonitorCacheIfNeed(item *cmodel.GraphItem) {
-	for tag, value := range item.Tags {
-		monitorItemCache.insertItemCacheIfNotExist(item.Metric, tag, value, item.DsType)
+	if len(item.Tags) == 0 {
+		monitorItemCache.insertItemCacheIfNotExist(item.Metric, "", "", item.DsType)
+	} else {
+
+		for tag, value := range item.Tags {
+			monitorItemCache.insertItemCacheIfNotExist(item.Metric, tag, value, item.DsType)
+		}
 	}
 }
